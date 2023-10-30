@@ -1,0 +1,313 @@
+ALTER TABLE FR_RULE ADD APPROVEDATE TIMESTAMP NULL;
+ALTER TABLE FR_RULE ADD APPROVEDBY VARCHAR2(250) NULL;
+ALTER TABLE FR_RULE ADD ISDELETED NUMBER(1,0) NULL;
+ALTER TABLE FR_RULEQUERY ADD ISDELETED NUMBER(1,0) NULL;
+
+
+
+DROP PROCEDURE FR_DELETERULE;
+
+CREATE SEQUENCE "SQ_FRULEQUERY_CANDIDATE" INCREMENT BY 1 MINVALUE 0 NOCYCLE NOCACHE NOORDER;
+
+CREATE TABLE "FR_RULEQUERY_CANDIDATE" 
+   (	"ID" NUMBER(38,0) DEFAULT "SQ_FRULEQUERY_CANDIDATE"."NEXTVAL" NOT NULL ENABLE, 
+	"RULEID" NUMBER(38,0), 
+	"QUERYNODES" CLOB, 
+	"QUERYEDGES" CLOB, 
+	"ISDELETED" NUMBER(1,0), 
+	"CREATEDBY" VARCHAR2(100), 
+	"CREATEDATE" DATE, 
+	"UPDATEDBY" VARCHAR2(100), 
+	"UPDATEDATE" DATE, 
+	"RULECANDIDATEID" NUMBER(38,0), 
+	 CONSTRAINT "FRULEQUERY_CANDIDATE_PK" PRIMARY KEY ("ID")
+  USING INDEX PCTFREE 10 INITRANS 2 MAXTRANS 255 COMPUTE STATISTICS 
+  TABLESPACE "USERS"  ENABLE, 
+	 CONSTRAINT "FK_FRULEQUERY_CANDIDATE" FOREIGN KEY ("RULEID")
+	  REFERENCES "FR_RULE" ("ID") ENABLE, 
+	 CONSTRAINT "FK_FRULE_CANDIDATE" FOREIGN KEY ("RULECANDIDATEID")
+	  REFERENCES "FR_RULE_CANDIDATE" ("ID") ENABLE
+   )
+
+-------------------------------------------------------------------------
+
+CREATE SEQUENCE "SQ_FRULE_CANDIDATE" INCREMENT BY 1 MINVALUE 0 NOCYCLE NOCACHE NOORDER;
+
+CREATE TABLE "FR_RULE_CANDIDATE" 
+   (	"ID" NUMBER(38,0) DEFAULT "SQ_FRULE_CANDIDATE"."NEXTVAL" NOT NULL ENABLE, 
+	"RULEID" NUMBER(38,0), 
+	"NAME" VARCHAR2(250), 
+	"DESCRIPTION" VARCHAR2(1000), 
+	"INPUTSERVICEENTITYID" NUMBER(38,0), 
+	"HIGHLIGHT" VARCHAR2(1000), 
+	"CREATEDATE" DATE, 
+	"CREATEDBY" VARCHAR2(100), 
+	"UPDATEDATE" DATE, 
+	"UPDATEDBY" VARCHAR2(100), 
+	"APPROVEDBY" VARCHAR2(100), 
+	"APPROVEDATE" DATE, 
+	"CANDIDATESTATE" NUMBER(4,0), 
+	 CONSTRAINT "FRULE_CANDIDATE_PK" PRIMARY KEY ("ID")
+	 )
+---------------------------------------------------------------------------------------------------
+
+
+CREATE OR REPLACE PROCEDURE FR_CREATERULE
+( 
+  pName NVARCHAR2,
+  pDescription NVARCHAR2, 
+  pInputServiceEntityId NUMBER,
+  pCreateBy VARCHAR2,
+  pCandidateState NUMBER,
+  rId OUT Number
+)
+AS
+BEGIN 
+  INSERT INTO FR_RULE_CANDIDATE (NAME, DESCRIPTION, INPUTSERVICEENTITYID, CANDIDATESTATE, CREATEDBY, CREATEDATE ) 
+  VALUES (pName, pDescription, pInputServiceEntityId, pCandidateState, pCreateBy, SYSDATE)
+ returning ID into rId;
+END;
+
+---------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE FR_FETCHRULES
+(
+      v_cursor OUT SYS_REFCURSOR
+)
+AS
+BEGIN
+   OPEN  v_cursor FOR 
+SELECT 
+ rc.ID, rc.NAME, rc.DESCRIPTION, rc.INPUTSERVICEENTITYID, rc.APPROVEDBY, rc.APPROVEDATE, rc.CANDIDATESTATE, r.ID RuleId
+FROM
+    FR_RULE_CANDIDATE rc
+LEFT JOIN FR_RULE r ON rc.RULEID = r.ID 
+ORDER BY rc.id DESC;
+END;
+---------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE FR_CREATERULEFROMCANDIDATE
+(
+	pId NUMBER,
+	pUpdateBy VARCHAR2,
+	pTargetState NUMBER,
+	rRuleId OUT NUMBER
+)
+AS
+	CURSOR res IS 
+		SELECT NAME, DESCRIPTION, INPUTSERVICEENTITYID, HIGHLIGHT, SYSDATE, pUpdateBy
+		FROM FR_RULE_CANDIDATE fc 
+		WHERE fc.ID = pId;
+BEGIN
+	
+FOR res1 in res
+   LOOP
+      INSERT INTO FR_RULE (NAME, DESCRIPTION, INPUTSERVICEENTITYID, HIGHLIGHT, APPROVEDATE, APPROVEDBY)
+      VALUES (res1.NAME, res1.DESCRIPTION, res1.INPUTSERVICEENTITYID, res1.HIGHLIGHT, SYSDATE, pUpdateBy)
+      returning ID into rRuleId;
+   END LOOP;
+
+IF rRuleId > 0 THEN
+	 
+	UPDATE FR_RULE_CANDIDATE SET RULEID = rRuleId, CANDIDATESTATE = pTargetState, APPROVEDATE = SYSDATE, APPROVEDBY = pUpdateBy WHERE ID = pId;
+	
+	INSERT INTO FR_RULEQUERY (RULEID, QUERYNODES, QUERYEDGES) 
+	SELECT rRuleId, QUERYNODES, QUERYEDGES FROM FR_RULEQUERY_CANDIDATE
+	WHERE RULECANDIDATEID = pId;
+END IF;
+
+END;
+
+---------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE FR_CHANGECANDIDATESTATE
+( 
+  pId NUMBER,
+  pTargetState NUMBER,
+  pIsApproveState NUMBER
+)
+AS
+	vRuleId NUMBER;
+BEGIN 
+  UPDATE FR_RULE_CANDIDATE SET CANDIDATESTATE = pTargetState WHERE ID = pId;
+ 
+ IF pIsApproveState = 1 
+ THEN
+ 	SELECT RULEID INTO vRuleId FROM FR_RULE_CANDIDATE WHERE ID = pId;
+ 
+ 	UPDATE FR_RULEQUERY SET ISDELETED = 1 WHERE RULEID = vRuleId;
+ 	
+	INSERT INTO FR_RULEQUERY (RULEID, QUERYNODES, QUERYEDGES) 
+	SELECT vRuleId, QUERYNODES, QUERYEDGES FROM FR_RULEQUERY_CANDIDATE
+	WHERE RULECANDIDATEID = pId;
+END IF;
+END;
+
+
+---------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE FR_UPDATERULES
+(
+	pId IN NUMBER,
+	pName IN VARCHAR2,
+	pDescription IN VARCHAR2,
+	pInputServiceEntityId IN NUMBER,
+	pUpdateBy IN VARCHAR2,
+	pCandidateState IN VARCHAR2
+)
+AS
+BEGIN
+    
+UPDATE FR_RULE_CANDIDATE
+SET 
+	NAME = pName,
+	DESCRIPTION  = pDescription,
+	INPUTSERVICEENTITYID  = pInputServiceEntityId,
+	UPDATEDBY = pUpdateBy,
+	UPDATEDATE = SYSDATE,
+	CANDIDATESTATE = pCandidateState
+WHERE id = pId;
+
+END;
+
+---------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE FR_RULEQUERYCRUD
+(
+	  pIsDeleted IN NUMBER,
+	  pId IN NUMBER,
+	  pRuleId IN NUMBER,
+      pQueryNodes IN VARCHAR2,
+      pQueryEdges IN VARCHAR2,
+      pCreatedBy IN VARCHAR2,
+      pUpdatedBy IN VARCHAR2,
+      pRuleCandidateState IN NUMBER,
+      pRuleCandidateId NUMBER,
+      v_cursor OUT SYS_REFCURSOR
+) 
+AS 
+	v_return_value NUMBER;
+BEGIN
+	v_return_value := pId;
+
+	-- DELETE item
+	IF pIsDeleted = 1
+	THEN 
+		UPDATE FR_RULEQUERY_CANDIDATE rq  SET rq.ISDELETED = 1 WHERE rq.ID = pId;
+	    v_return_value := SQL%ROWCOUNT;
+	    OPEN  v_cursor FOR
+		SELECT v_return_value FROM dual;
+	------------------------------------------
+	-- UPDATE item
+	ELSIF pId IS NOT NULL AND pId > 0
+	THEN 
+		UPDATE FR_RULEQUERY_CANDIDATE rq 
+		SET rq.QUERYNODES = pQueryNodes, rq.QUERYEDGES = pQueryEdges, rq.UPDATEDBY = pUpdatedBy, rq.UPDATEDATE = SYSDATE
+		WHERE rq.ID = pId; 
+		v_return_value := SQL%ROWCOUNT;
+		OPEN  v_cursor FOR
+		SELECT v_return_value FROM dual;
+	
+		UPDATE FR_RULE_CANDIDATE rc
+		SET rc.CANDIDATESTATE = pRuleCandidateState WHERE rc.ID = pRuleId;
+	------------------------------------------
+	-- ADD ROW	
+	ELSIF pRuleCandidateId IS NOT NULL AND pRuleCandidateId > 0
+	THEN 
+		INSERT INTO FR_RULEQUERY_CANDIDATE (RULECANDIDATEID, QUERYNODES, QUERYEDGES, CREATEDATE, CREATEDBY) 
+						   VALUES(pRuleCandidateId, pQueryNodes, pQueryEdges, SYSDATE, pCreatedBy) RETURNING ID INTO v_return_value;
+		OPEN  v_cursor FOR
+		SELECT v_return_value FROM dual;
+		UPDATE FR_RULE_CANDIDATE rc
+			SET rc.CANDIDATESTATE = pRuleCandidateState WHERE rc.ID = pRuleId;
+	------------------------------------------
+	-- SELECT rows
+	ELSE 
+		OPEN  v_cursor FOR
+		SELECT 
+			rq.ID, rq.RULEID, rq.RULECANDIDATEID, rq.QUERYNODES, rq.QUERYEDGES
+		FROM 
+			FR_RULEQUERY_CANDIDATE rq
+		WHERE pId IS NULL OR (pId IS NOT NULL AND rq.ID = pId);
+	END IF;
+	------------------------------------------
+END;
+
+---------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE FR_FETCHRULEQUERIESWITHRULEID
+(
+	  pRuleCandidateId IN NUMBER,
+      v_cursor OUT SYS_REFCURSOR
+)
+AS
+BEGIN
+   OPEN  v_cursor FOR
+SELECT rq.ID, rq.RULEID, rq.QUERYNODES, rq.QUERYEDGES, r.NAME RuleCandidateName FROM FR_RULEQUERY_CANDIDATE rq 
+LEFT JOIN FR_RULE_CANDIDATE r ON r.ID = rq.RULECANDIDATEID  
+WHERE rq.RULECANDIDATEID = pRuleCandidateId;
+END;
+
+
+---------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE FR_DELETERULE
+(
+	pId IN NUMBER,
+	pTargetState IN NUMBER
+)
+AS
+BEGIN
+    
+UPDATE FR_RULE_CANDIDATE
+SET 
+	CANDIDATESTATE = pTargetState
+WHERE id = pId;
+
+DELETE FROM FR_RULE WHERE ID = (SELECT RULEID FROM FR_RULE_CANDIDATE WHERE id = pId);
+
+END;
+---------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE FR_DELETERULE
+(
+	pId IN NUMBER,
+	pTargetState IN NUMBER
+)
+AS
+BEGIN
+    
+UPDATE FR_RULE_CANDIDATE
+SET 
+	CANDIDATESTATE = pTargetState
+WHERE id = pId;
+
+UPDATE FR_RULE SET ISDELETED = 1 WHERE ID = (SELECT RULEID FROM FR_RULE_CANDIDATE WHERE id = pId);
+
+END;
+
+
+---------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE FR_FETCHRULESETSWITHRULES
+(
+      v_cursor OUT SYS_REFCURSOR
+)
+AS
+BEGIN
+   OPEN  v_cursor FOR
+SELECT 
+rs.ID RuleSetId, rs.NAME RuleSetName,
+rsr.SCORE RuleScore,
+r.ID RuleId, r.NAME RuleName, r.INPUTSERVICEENTITYID InputServiceEntityId, r.HIGHLIGHT Highlight,
+rq.ID RuleQueryId, rq.QUERYNODES QueryNodes, rq.QUERYEDGES QueryEdges
+FROM FR_RULESET rs 
+LEFT JOIN FR_FRULESETRULE rsr ON rs.ID = rsr.RULESETID 
+LEFT JOIN FR_RULE r ON r.ID = rsr.RULEID
+LEFT JOIN FR_RULEQUERY rq ON rq.RULEID = r.ID
+WHERE r.ISDELETED IS NULL;
+END;
+
+---------------------------------------------------------------------------------------------------
+
+INSERT INTO TNRK_MIGRATIONS (NAME,RECORD_DATE) VALUES('20230912_1450.sql',CURRENT_TIMESTAMP)
